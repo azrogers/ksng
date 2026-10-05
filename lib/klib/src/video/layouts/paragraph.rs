@@ -272,6 +272,7 @@ impl ParagraphLayout {
           glyphs.clear();
 
           let mut glyph_x = 0.0;
+          let mut glyph_y = 0.0_f64;
           for (pos, info) in shape
             .get_glyph_positions()
             .iter()
@@ -287,6 +288,10 @@ impl ParagraphLayout {
             });
 
             glyph_x += x_advance;
+            if let Some(extents) = hbfont.get_glyph_extents(info.codepoint) {
+              let h = (extents.height as f64 * size) / upem;
+              glyph_y = glyph_y.max(h.abs());
+            }
           }
 
           let Some(blob) =
@@ -294,6 +299,15 @@ impl ParagraphLayout {
           else {
             log::warn!("failed to create text blob for string {text}");
             return events.len();
+          };
+
+          let ofs = blob.bounds().height() - glyph_y as f32;
+
+          let computed_rect = Rect {
+            x0: blob.bounds().left,
+            y0: blob.bounds().top + ofs,
+            x1: blob.bounds().left + glyph_x as f32,
+            y1: blob.bounds().bottom,
           };
 
           out_elements.push((
@@ -306,6 +320,7 @@ impl ParagraphLayout {
               },
               text,
               blob,
+              computed_rect,
               font,
               context.style,
             ),

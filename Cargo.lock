@@ -2787,7 +2787,6 @@ dependencies = [
  "sortedlist-rs",
  "spectrasonic",
  "uuid",
- "zerocopy",
 ]
 
 [[package]]

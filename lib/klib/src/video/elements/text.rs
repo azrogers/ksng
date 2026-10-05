@@ -20,6 +20,7 @@ pub struct TextVideoElement {
   start: Timecode,
   end: Timecode,
   pos: Point,
+  rect: Rect,
   #[allow(dead_code)]
   text: String,
   metrics: TextMetrics,
@@ -34,6 +35,7 @@ impl TextVideoElement {
     pos: Point,
     text: &str,
     blob: skia_safe::TextBlob,
+    rect: Rect,
     font: &skia_safe::Font,
     style: &LyricsTrackStyle,
   ) -> Box<dyn VideoElement> {
@@ -46,6 +48,7 @@ impl TextVideoElement {
       start: event.start_timecode,
       end: event.end_timecode,
       pos,
+      rect,
       text: text.to_string(),
       metrics: TextMetrics {
         ascent: metrics.ascent,
@@ -72,10 +75,11 @@ impl VideoElement for TextVideoElement {
   }
 
   fn bounds(&self) -> Rect {
+    let ofs = self.blob.bounds().height() - self.rect.height();
     Rect {
       x0: self.pos.x,
-      y0: self.pos.y + self.metrics.ascent,
-      x1: self.pos.x + self.blob.bounds().width(),
+      y0: self.pos.y + self.metrics.ascent + ofs,
+      x1: self.pos.x + self.rect.width(),
       y1: self.pos.y + self.blob.bounds().height() + self.metrics.ascent + self.metrics.descent,
     }
   }
@@ -98,35 +102,37 @@ impl VideoElement for TextVideoElement {
     let draw_normal = normalized_pos < 1.0;
     let draw_highlight = normalized_pos > 0.0;
 
+    let bounds = self.bounds();
+
     let pos = Point {
-      x: self.pos.x,
-      y: self.pos.y + self.blob.bounds().height() + self.metrics.ascent + self.metrics.descent,
+      x: bounds.x0,
+      y: bounds.y1,
     };
 
     if draw_normal && draw_highlight {
       canvas.save();
       canvas.clip_rect(
         skia_safe::Rect {
-          left: self.pos.x + self.blob.bounds().width() * normalized_pos,
-          top: self.pos.y,
-          right: self.pos.x + self.blob.bounds().width(),
-          bottom: self.pos.y + self.blob.bounds().height(),
+          left: bounds.x0 + bounds.width() * normalized_pos,
+          top: bounds.y0,
+          right: bounds.x1,
+          bottom: bounds.y1 + self.metrics.descent,
         },
         None,
         true,
       );
 
-      canvas.draw_text_blob(self.blob.clone(), pos, &self.normal_paint);
+      canvas.draw_text_blob(&self.blob, pos, &self.normal_paint);
 
       canvas.restore();
       canvas.save();
 
       canvas.clip_rect(
         skia_safe::Rect {
-          left: self.pos.x,
-          top: self.pos.y,
-          right: self.pos.x + self.blob.bounds().width() * normalized_pos,
-          bottom: self.pos.y + self.blob.bounds().height(),
+          left: bounds.x0,
+          top: bounds.y0,
+          right: bounds.x0 + bounds.width() * normalized_pos,
+          bottom: bounds.y1 + self.metrics.descent,
         },
         None,
         true,
