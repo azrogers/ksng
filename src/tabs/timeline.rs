@@ -73,22 +73,41 @@ struct DragState {
   timings: Vec<(Timecode, Timecode)>,
   orig_timings: Vec<(Timecode, Timecode)>,
   drag_type: DragType,
+  /// For a single audio clip, the earliest start (where its audio begins) and
+  /// the latest end (where its audio runs out, if the length is known).
+  audio_bounds: Option<(Timecode, Option<Timecode>)>,
 }
 
 impl DragState {
-  pub fn new(project: &Project, drag_type: DragType, events: Vec<Uuid>) -> DragState {
+  pub fn new(
+    project: &Project,
+    drag_type: DragType,
+    events: Vec<Uuid>,
+    source_duration_s: Option<f32>,
+  ) -> DragState {
     // dedup events
     let events: HashSet<Uuid> = HashSet::from_iter(events);
     let events = Vec::from_iter(events);
 
     let mut events_timings = Vec::with_capacity(events.len());
+    let mut audio_bounds = None;
     for ev in &events {
       for track in &project.file.tracks {
         if let Some(ev) = track.events.find_id(*ev) {
           events_timings.push((ev.id, ev.start_timecode, ev.end_timecode));
+          if let Some(EventValue::AudioClip { offset, .. }) = &ev.value {
+            // Saturates at 0 if the audio would begin before the timeline does.
+            let audio_start = ev.start_timecode - *offset;
+            let audio_end =
+              source_duration_s.map(|d| ev.start_timecode + (Timecode::from_seconds(d) - *offset));
+            audio_bounds = Some((audio_start, audio_end));
+          }
           break;
         }
       }
+    }
+    if events_timings.len() != 1 {
+      audio_bounds = None;
     }
 
     events_timings.sort_by_key(|(_, start, _)| *start);
@@ -106,6 +125,7 @@ impl DragState {
       orig_timings: timings.clone(),
       timings,
       drag_type,
+      audio_bounds,
     }
   }
 }
@@ -564,7 +584,22 @@ impl Timeline {
                 }
               }
 
-              self.drag_state = Some(DragState::new(project, drag_type, events));
+              let source_duration_s =
+                if drag_type != DragType::MoveEvent && ev.event_type == EventType::AudioClip {
+                  app
+                    .waveforms
+                    .borrow()
+                    .get_waveform(ui.ctx(), &project.file, ev)
+                    .map(|cache| cache.info().duration)
+                } else {
+                  None
+                };
+              self.drag_state = Some(DragState::new(
+                project,
+                drag_type,
+                events,
+                source_duration_s,
+              ));
             }
           }
 
@@ -592,7 +627,23 @@ impl Timeline {
               .borrow()
               .get_waveform(ui.ctx(), &project.file, ev)
           {
-            Self::draw_audio_event(ui, ev, ev_rect, pixels_per_second, ofs, cache);
+            let offset_s = match &ev.value {
+              Some(EventValue::AudioClip { offset, .. }) => offset.to_seconds(),
+              _ => 0.0,
+            };
+            // While trimming the start edge, the audio stays put under the
+            // clip.
+            let is_trimming_start = self
+              .drag_state
+              .as_ref()
+              .is_some_and(|ds| ds.drag_type == DragType::Start && ds.events.contains(&ev.id));
+            let clip_start_s = if is_trimming_start {
+              ev.start_timecode.to_seconds()
+            } else {
+              start.to_seconds()
+            };
+            let audio_start_x = ofs + (clip_start_s - offset_s) * pixels_per_second;
+            Self::draw_audio_event(ui, ev_rect, pixels_per_second, audio_start_x, cache);
           }
 
           ui.painter().rect_stroke(
@@ -642,10 +693,14 @@ impl Timeline {
             self.state = TimelineUiState::Idle;
           } else if self.state == TimelineUiState::Dragging {
             if let Some(drag_state) = &self.drag_state {
-              app.commands.dispatch(SetEventTimingsCommand::new(
-                &drag_state.events,
-                &drag_state.timings,
-              ));
+              let command = SetEventTimingsCommand::new(&drag_state.events, &drag_state.timings);
+              app
+                .commands
+                .dispatch(if drag_state.drag_type == DragType::Start {
+                  command.with_trim_start()
+                } else {
+                  command
+                });
             }
             self.is_dragging = false;
             self.drag_state = None;
@@ -745,17 +800,12 @@ impl Timeline {
 
   fn draw_audio_event(
     ui: &mut Ui,
-    ev: &Event,
     ev_rect: Rect,
     pixels_per_second: f32,
-    ofs: f32,
+    audio_start_x: f32,
     cache: Arc<WaveformCache>,
   ) {
     let info = cache.info();
-    let audio_offset = match &ev.value {
-      Some(EventValue::AudioClip { offset, .. }) => offset.to_seconds(),
-      _ => 0.0,
-    };
     let mut mip_level = info.levels - 1;
     let visible_ev_rect = ev_rect.intersect(ui.max_rect());
     for (level, pxs) in info.pixel_to_s.iter().enumerate() {
@@ -780,11 +830,9 @@ impl Timeline {
     for i in 0..imgs_per_level {
       let start_s = image_duration * i as f32;
       let end_s = (image_duration * (i as f32 + 1.0)).min(duration);
-      let start_x = (start_s - audio_offset) * pixels_per_second;
-      let end_x = (end_s - audio_offset) * pixels_per_second;
       let img_rect = Rect {
-        min: Pos2::new(start_x + ofs, ev_rect.top()),
-        max: Pos2::new(end_x + ofs, ev_rect.bottom()),
+        min: Pos2::new(audio_start_x + start_s * pixels_per_second, ev_rect.top()),
+        max: Pos2::new(audio_start_x + end_s * pixels_per_second, ev_rect.bottom()),
       };
       if !img_rect.intersects(ui.max_rect()) {
         continue;
@@ -866,14 +914,20 @@ impl Timeline {
     match drag_state.drag_type {
       DragType::Start => {
         let (start, end) = drag_state.timings[0];
+        let max_pos = end - MIN_EVENT_SIZE;
+        let mut min_pos = start - Timecode(max_move_left);
+        // Clamp trim to start of audio
+        if let Some((audio_start, _)) = drag_state.audio_bounds {
+          min_pos = min_pos.max(audio_start).min(max_pos);
+        }
         let drag_pos = Self::get_drag_pos(
           pixels_per_second,
           mouse_time,
-          start - Timecode(max_move_left),
-          end - MIN_EVENT_SIZE,
+          min_pos,
+          max_pos,
           &[
-            start - Timecode(max_move_left),
-            end - MIN_EVENT_SIZE,
+            min_pos,
+            max_pos,
             drag_state.orig_timings[0].0,
             playback_time,
           ],
@@ -882,14 +936,20 @@ impl Timeline {
       }
       DragType::End => {
         let (start, end) = drag_state.timings[0];
+        let min_pos = start + MIN_EVENT_SIZE;
+        let mut max_pos = end + Timecode(max_move_right);
+        // Clamp trim to end of audio
+        if let Some((_, Some(audio_end))) = drag_state.audio_bounds {
+          max_pos = max_pos.min(audio_end).max(min_pos);
+        }
         let drag_pos = Self::get_drag_pos(
           pixels_per_second,
           mouse_time,
-          start + MIN_EVENT_SIZE,
-          end + Timecode(max_move_right),
+          min_pos,
+          max_pos,
           &[
-            start + MIN_EVENT_SIZE,
-            end + Timecode(max_move_right),
+            min_pos,
+            max_pos,
             drag_state.orig_timings[0].1,
             playback_time,
           ],

@@ -4,7 +4,7 @@ use klib::{
   audio::info::AudioFileInfo,
   objects::{
     audio::{AudioFile, AudioFileSource},
-    event::Event,
+    event::{Event, EventValue},
     track::EventList,
   },
   timecode::Timecode,
@@ -111,6 +111,10 @@ pub struct SetEventTimingsCommand {
   event_ids: Vec<Uuid>,
   new_timings: Vec<(Timecode, Timecode)>,
   old_timings: RefCell<Vec<(Timecode, Timecode)>>,
+  /// When set, audio clip timings update the offset instead of sliding the
+  /// audio.
+  trim_start: bool,
+  old_offsets: RefCell<Vec<Option<Timecode>>>,
 }
 
 impl SetEventTimingsCommand {
@@ -136,7 +140,15 @@ impl SetEventTimingsCommand {
       event_ids: event_ids.into(),
       new_timings: timings.into(),
       old_timings: Default::default(),
+      trim_start: false,
+      old_offsets: Default::default(),
     }
+  }
+
+  /// When set, audio clip timings are updated correctly
+  pub fn with_trim_start(mut self) -> Self {
+    self.trim_start = true;
+    self
   }
 }
 
@@ -172,12 +184,24 @@ impl Command for SetEventTimingsCommand {
     }
 
     let mut old_timings = Vec::new();
+    let mut old_offsets = Vec::new();
 
     for (i, id) in self.event_ids.iter().enumerate() {
       for track in &mut file.tracks {
         if let Some(mut event) = track.events.take_id(*id) {
           let (new_start, new_end) = self.new_timings[i];
           old_timings.push((event.start_timecode, event.end_timecode));
+
+          let mut old_offset = None;
+          if self.trim_start
+            && let Some(EventValue::AudioClip { offset, .. }) = &mut event.value
+          {
+            old_offset = Some(*offset);
+            let delta = new_start.0 as i64 - event.start_timecode.0 as i64;
+            *offset = Timecode((offset.0 as i64 + delta).clamp(0, u32::MAX as i64) as u32);
+          }
+          old_offsets.push(old_offset);
+
           event.start_timecode = new_start;
           event.end_timecode = new_end;
           track.events.insert(event);
@@ -187,6 +211,7 @@ impl Command for SetEventTimingsCommand {
     }
 
     *self.old_timings.borrow_mut() = old_timings;
+    *self.old_offsets.borrow_mut() = old_offsets;
 
     Ok(())
   }
@@ -201,6 +226,7 @@ impl Command for SetEventTimingsCommand {
       ))?;
 
     let old_timings = self.old_timings.borrow();
+    let old_offsets = self.old_offsets.borrow();
 
     if self.event_ids.len() != old_timings.len() {
       return Err(UiError::InvalidCommand(
@@ -214,6 +240,11 @@ impl Command for SetEventTimingsCommand {
           let (new_start, new_end) = old_timings[i];
           event.start_timecode = new_start;
           event.end_timecode = new_end;
+          if let Some(Some(old_offset)) = old_offsets.get(i)
+            && let Some(EventValue::AudioClip { offset, .. }) = &mut event.value
+          {
+            *offset = *old_offset;
+          }
           track.events.insert(event);
           break;
         }

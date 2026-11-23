@@ -48,9 +48,9 @@ impl Playback {
         .mixer
         .update_audio_device(&app.preferences.borrow().audio_config),
     );
-    self.mixer.seek(pos);
     self.state = PlaybackState::Stopped;
     self.on_audio_change(app);
+    self.mixer.seek(pos);
   }
 
   pub fn state(&self) -> PlaybackState {

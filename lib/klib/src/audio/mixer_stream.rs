@@ -89,19 +89,42 @@ impl AudioMixerStream {
     self.position = new_position;
     // Seek immediately in all of the events we can to start buffering them.
     for es in &mut self.event_streams {
-      if new_timecode < es.start_timecode {
-        es.read_stream.seek(Timecode(0).into())?;
-        continue;
-      } else if new_timecode >= es.end_timecode {
-        es.read_stream.seek(es.read_stream.duration())?;
-        continue;
-      }
-
-      let new_pos = (new_timecode - es.start_timecode + es.offset).into();
-      es.read_stream.seek(new_pos)?;
+      Self::seek_event_stream(es, new_timecode)?;
     }
 
     Ok(())
+  }
+
+  fn seek_event_stream(es: &mut AudioMixerEventStream, t: Timecode) -> Result<(), Error> {
+    let pos = if t <= es.start_timecode {
+      es.offset
+    } else if t >= es.end_timecode {
+      es.end_timecode - es.start_timecode + es.offset
+    } else {
+      t - es.start_timecode + es.offset
+    };
+    es.read_stream.seek(pos.into())?;
+    Ok(())
+  }
+
+  /// Makes sure the event timing doesn't go past the end of the actual file.
+  fn clamp_end(
+    read_stream: &AudioChain,
+    start: Timecode,
+    end: Timecode,
+    offset: Timecode,
+  ) -> Timecode {
+    let source_len: Timecode = read_stream.duration().into();
+    if source_len == Timecode(0) {
+      // Clip doesn't have a length so just use the event's len
+      return end;
+    }
+    end.min(start + (source_len - offset))
+  }
+
+  /// The timeline position the next process call will render.
+  fn current_timecode(&self) -> Timecode {
+    Timecode::from_seconds_f64(self.position as f64 / self.time_factor / self.sample_rate as f64)
   }
 
   /// Resets the position to zero and clears all loaded streams.
@@ -119,6 +142,7 @@ impl AudioMixerStream {
     let current_event_ids: HashSet<Uuid> =
       self.event_streams.iter().map(|es| es.event_id).collect();
     let mut new_event_ids: HashSet<Uuid> = Default::default();
+    let now = self.current_timecode();
 
     for track in tracks {
       let Some(TrackValue::Audio(track_audio)) = &track.track_value else {
@@ -148,10 +172,25 @@ impl AudioMixerStream {
             continue;
           };
 
+          let end_timecode = Self::clamp_end(
+            &existing_event_stream.read_stream,
+            ev.start_timecode,
+            ev.end_timecode,
+            *offset,
+          );
+          let timing_changed = existing_event_stream.offset != *offset
+            || existing_event_stream.start_timecode != ev.start_timecode
+            || existing_event_stream.end_timecode != end_timecode;
+
           existing_event_stream.volume = track_volume;
           existing_event_stream.offset = *offset;
           existing_event_stream.start_timecode = ev.start_timecode;
-          existing_event_stream.end_timecode = ev.end_timecode;
+          existing_event_stream.end_timecode = end_timecode;
+
+          // Update stale read position
+          if timing_changed {
+            Self::seek_event_stream(existing_event_stream, now)?;
+          }
         } else {
           let source = match &file.source {
             AudioFileSource::Path(path_buf) => spectrasonic::sources::source_for_file(path_buf)?,
@@ -183,8 +222,9 @@ impl AudioMixerStream {
 
           let chain = builder.commit();
           let buffer = PlanarVecBuffer::new(chain.info().num_channels, self.block_size);
+          let end_timecode = Self::clamp_end(&chain, ev.start_timecode, ev.end_timecode, *offset);
 
-          self.event_streams.push(AudioMixerEventStream {
+          let mut es = AudioMixerEventStream {
             track_id: track.id,
             event_id: ev.id,
             volume: track_volume,
@@ -192,8 +232,11 @@ impl AudioMixerStream {
             read_stream: chain,
             read_buffer: buffer,
             start_timecode: ev.start_timecode,
-            end_timecode: ev.end_timecode,
-          });
+            end_timecode,
+          };
+          // Seek to the correct position in the audio stream.
+          Self::seek_event_stream(&mut es, now)?;
+          self.event_streams.push(es);
         }
       }
     }
@@ -250,8 +293,7 @@ impl AudioMixerStream {
   }
 
   fn process_impl(&mut self) -> Result<usize, Error> {
-    let timecode =
-      Timecode::from_seconds_f64(self.position as f64 / self.time_factor / self.sample_rate as f64);
+    let timecode = self.current_timecode();
     self.buffer.fill(0.0_f32);
 
     if self.position >= self.duration {
