@@ -61,6 +61,12 @@ impl TextVideoElement {
   }
 }
 
+impl TextVideoElement {
+  fn baseline_y(&self) -> f32 {
+    self.pos.y - self.metrics.ascent
+  }
+}
+
 impl VideoElement for TextVideoElement {
   fn id(&self) -> Uuid {
     self.id
@@ -75,12 +81,12 @@ impl VideoElement for TextVideoElement {
   }
 
   fn bounds(&self) -> Rect {
-    let ofs = self.blob.bounds().height() - self.rect.height();
+    let baseline = self.baseline_y();
     Rect {
       x0: self.pos.x,
-      y0: self.pos.y + self.metrics.ascent + ofs,
+      y0: baseline + self.metrics.ascent,
       x1: self.pos.x + self.rect.width(),
-      y1: self.pos.y + self.blob.bounds().height() + self.metrics.ascent + self.metrics.descent,
+      y1: baseline + self.metrics.descent,
     }
   }
 
@@ -106,17 +112,21 @@ impl VideoElement for TextVideoElement {
 
     let pos = Point {
       x: bounds.x0,
-      y: bounds.y1,
+      y: self.baseline_y(),
     };
+
+    let pad = bounds.height();
+    let clip_top = bounds.y0 - pad;
+    let clip_bottom = bounds.y1 + pad;
 
     if draw_normal && draw_highlight {
       canvas.save();
       canvas.clip_rect(
         skia_safe::Rect {
           left: bounds.x0 + bounds.width() * normalized_pos,
-          top: bounds.y0,
+          top: clip_top,
           right: bounds.x1,
-          bottom: bounds.y1 + self.metrics.descent,
+          bottom: clip_bottom,
         },
         None,
         true,
@@ -130,9 +140,9 @@ impl VideoElement for TextVideoElement {
       canvas.clip_rect(
         skia_safe::Rect {
           left: bounds.x0,
-          top: bounds.y0,
+          top: clip_top,
           right: bounds.x0 + bounds.width() * normalized_pos,
-          bottom: bounds.y1 + self.metrics.descent,
+          bottom: clip_bottom,
         },
         None,
         true,

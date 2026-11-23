@@ -36,12 +36,6 @@ pub struct ParagraphLayout {
   merger_mode: ParagraphMergerMode,
 }
 
-struct LineWidthInfo {
-  current_line: usize,
-  current_start: f32,
-  last_end: f32,
-}
-
 impl ParagraphLayout {
   pub fn new(merger_mode: ParagraphMergerMode) -> ParagraphLayout {
     ParagraphLayout { merger_mode }
@@ -83,53 +77,30 @@ impl ParagraphLayout {
 
       // Centrist
       let mut page_rect_builder = RectBuilder::default();
-      let mut line_height: f32 = 0.0;
-
-      let mut line_widths = HashMap::new();
-      let mut line_width_info = None;
+      let mut line_extents: HashMap<usize, (f32, f32)> = HashMap::new();
       for (line, elem) in &page_elements {
         let rect = elem.bounds();
         page_rect_builder.add_rect(rect);
-        line_height = line_height.max(rect.height());
-        match &mut line_width_info {
-          None => {
-            line_width_info = Some(LineWidthInfo {
-              current_line: *line,
-              current_start: rect.x0,
-              last_end: rect.x1,
-            });
-          }
-          Some(info) => {
-            if *line != info.current_line {
-              line_widths.insert(info.current_line, info.last_end - info.current_start);
-              line_width_info = Some(LineWidthInfo {
-                current_line: *line,
-                current_start: rect.x0,
-                last_end: rect.x1,
-              });
-            } else {
-              info.last_end = rect.x1;
-            }
-          }
-        };
+        line_extents
+          .entry(*line)
+          .and_modify(|(x0, x1)| {
+            *x0 = x0.min(rect.x0);
+            *x1 = x1.max(rect.x1);
+          })
+          .or_insert((rect.x0, rect.x1));
       }
 
-      if let Some(info) = line_width_info {
-        // handle remaining line width
-        line_widths.insert(info.current_line, info.last_end - info.current_start);
-      }
-
-      let page_height = page_rect_builder.to_rect().unwrap_or_default().height();
-      let y_offset =
-        context.area.y0 + context.area.height() / 2.0 - page_height / 2.0 - line_height / 2.0;
+      let page_rect = page_rect_builder.to_rect().unwrap_or_default();
+      let area_center = context.area.center();
+      let dy = area_center.y - page_rect.center().y;
       for (line, e) in &mut page_elements {
-        let Some(width) = line_widths.get(line) else {
+        let Some((x0, x1)) = line_extents.get(line) else {
           continue;
         };
 
         e.set_transform(Matrix::translate(Point {
-          x: context.area.x0 + context.area.width() / 2.0 - width / 2.0,
-          y: y_offset,
+          x: area_center.x - (x0 + x1) / 2.0,
+          y: dy,
         }));
       }
 

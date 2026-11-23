@@ -72,6 +72,7 @@ impl VideoElement for ParagraphVideoElement {
     let mut builder = RectBuilder::default();
     for e in &self.elements {
       let skrect: skia_safe::Rect = e.bounds().into();
+      let (skrect, _) = e.transform().map_rect(skrect);
       builder.add_rect(skrect.into());
     }
 

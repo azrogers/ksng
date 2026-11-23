@@ -35,6 +35,7 @@
 ✔ lyrics editor @done(26-01-12 04:41)
 ✔ moving and resizing events on timeline @done(26-02-05 23:20)
 ✔ lyrics sync wizard @done(26-06-14 23:25)
+☐ section breaks
 ☐ lyrics sync model
 	☐ syllabification model
 ☐ add mdxnet support (https://github.com/seanghay/uvr-mdx-infer/blob/main/separate.py)
