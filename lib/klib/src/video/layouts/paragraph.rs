@@ -125,6 +125,12 @@ impl ParagraphLayout {
 
             line_elements.push(elem);
           }
+
+          if !line_elements.is_empty() {
+            elements.push(Box::new(ParagraphVideoElement::from_elements(
+              line_elements.into_iter(),
+            )));
+          }
         }
         ParagraphMergerMode::MultiLine(n) => {
           let mut num_lines_pending = 0;
@@ -139,12 +145,19 @@ impl ParagraphLayout {
                 )));
 
                 line_elements = Vec::new();
+                num_lines_pending = 0;
               }
 
               line_index = line;
             }
 
             line_elements.push(elem);
+          }
+
+          if !line_elements.is_empty() {
+            elements.push(Box::new(ParagraphVideoElement::from_elements(
+              line_elements.into_iter(),
+            )));
           }
         }
         ParagraphMergerMode::Page => {
@@ -173,6 +186,10 @@ impl ParagraphLayout {
     let upem = hbfont.face().upem() as f64;
     let size = font.size() as f64;
 
+    let (_, metrics) = font.metrics();
+    let line_box_height = metrics.descent - metrics.ascent;
+    let line_pitch = font.spacing() * context.style.line_height_multiplier;
+
     let mut char_positions = Vec::new();
     let mut glyphs = Vec::new();
 
@@ -196,7 +213,7 @@ impl ParagraphLayout {
           let mut shape = harfbuzz_rs::shape(hbfont, text_buffer, &[]);
           let layout_rect = Self::compute_rect_from_glyphs(font, hbfont, &shape);
 
-          let (width, height) = (layout_rect.width(), layout_rect.height());
+          let width = layout_rect.width();
           let x = if first_on_line || event.linked_id.is_some() {
             next_x
           } else {
@@ -214,7 +231,7 @@ impl ParagraphLayout {
             first_on_line = false;
           }
 
-          if (next_y + height) > rect.y1 {
+          if (next_y + line_box_height) > rect.y1 {
             // Paragraph done
             idx -= 1;
             break;
@@ -237,7 +254,7 @@ impl ParagraphLayout {
             }
           }
 
-          line_y = line_y.max(next_y + height * context.style.line_height_multiplier);
+          line_y = line_y.max(next_y + line_pitch);
 
           char_positions.clear();
           glyphs.clear();

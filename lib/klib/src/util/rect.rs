@@ -41,7 +41,7 @@ impl Rect {
       x0: self.x0.min(self.x1),
       y0: self.y0.min(self.y1),
       x1: self.x1.max(self.x0),
-      y1: self.y1.max(self.y1),
+      y1: self.y1.max(self.y0),
     }
   }
 }

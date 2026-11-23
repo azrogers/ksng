@@ -115,22 +115,22 @@ impl VideoElement for FadeTransitionElement {
       let te = self.element.end_time();
       let tl = self.start_time;
       let tt = self.end_time;
-      let tin = (ts - self.transition_time).max(tl);
-      let tout = (te + self.transition_time).min(tt);
+      let fade_in = self.transition_time.min(ts - tl);
+      let fade_out = self.transition_time.min(tt - te);
 
-      if p >= tin && p < ts {
+      if p < tl || p >= tt {
+        0.0
+      } else if p < tl + fade_in {
         self
           .easing_in
-          .evaluate((p - tin).to_seconds() / (ts - tin).to_seconds())
-      } else if p >= te && p < tout {
+          .evaluate((p - tl).to_seconds() / fade_in.to_seconds())
+      } else if p >= tt - fade_out {
         1.0
           - self
             .easing_out
-            .evaluate((p - te).to_seconds() / (tout - te).to_seconds())
-      } else if p >= ts && p < te {
-        1.0
+            .evaluate((p - (tt - fade_out)).to_seconds() / fade_out.to_seconds())
       } else {
-        0.0
+        1.0
       }
     };
 
