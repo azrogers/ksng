@@ -18,8 +18,8 @@ pub struct SlideTransitionConfig {
   /// The maximum amount of time an event will be displayed for after it
   /// happens.
   pub trail_time: Timecode,
-  /// The maximum amount of time that the fade transition itself will play at
-  /// the start.
+  /// The maximum amount of time that the slide transition itself will play at
+  /// the start and end.
   pub transition_time: Timecode,
   /// The easing function used for the slide in.
   pub easing_in: EasingFunction,
@@ -99,50 +99,48 @@ impl VideoElement for SlideTransitionElement {
   }
 
   fn render<'canvas>(&self, context: &mut VideoElementRenderContext<'canvas>) {
+    let p = context.time;
+    let ts = self.element.start_time();
+    let te = self.element.end_time();
+    let tl = self.start_time;
+    let tt = self.end_time;
+    if p < tl || p >= tt {
+      return;
+    }
+
+    let slide_in = self.transition_time.min(ts - tl);
+    let slide_out = self.transition_time.min(tt - te);
+
+    let bounds: skia_safe::Rect = self.element.bounds().into();
+    let (bounds, _) = self.element.transform().map_rect(bounds);
     let size = context.canvas.base_layer_size();
-    let rect = skia_safe::Rect {
-      left: 0.0,
+    let clip = |left: f32, right: f32| skia_safe::Rect {
+      left,
       top: 0.0,
-      right: size.width as f32,
+      right,
       bottom: size.height as f32,
     };
-    let clip_rect = if context.time < self.element.start_time() {
-      let t = self.easing_in.evaluate(
-        (context.time - self.start_time).to_seconds()
-          / (self.element.start_time() - self.start_time)
-            .min(self.transition_time)
-            .to_seconds(),
-      );
 
-      skia_safe::Rect {
-        left: rect.left,
-        top: rect.top,
-        right: rect.left + rect.width() * t,
-        bottom: rect.bottom,
-      }
-    } else if context.time > self.element.end_time() {
-      let t = 1.0
-        - self.easing_out.evaluate(
-          (self.end_time - context.time).to_seconds()
-            / (self.end_time - self.element.end_time())
-              .min(self.transition_time)
-              .to_seconds(),
-        );
-
-      skia_safe::Rect {
-        left: rect.left + rect.width() * t,
-        top: rect.top,
-        right: rect.right,
-        bottom: rect.bottom,
-      }
+    let clip_rect = if p < tl + slide_in {
+      let t = self
+        .easing_in
+        .evaluate((p - tl).to_seconds() / slide_in.to_seconds());
+      Some(clip(bounds.left, bounds.left + bounds.width() * t))
+    } else if p >= tt - slide_out {
+      let t = self
+        .easing_out
+        .evaluate((p - (tt - slide_out)).to_seconds() / slide_out.to_seconds());
+      Some(clip(bounds.left + bounds.width() * t, bounds.right))
     } else {
-      rect
+      None
     };
 
     context.canvas.save();
-    context
-      .canvas
-      .clip_rect(clip_rect, skia_safe::ClipOp::Intersect, Some(true));
+    if let Some(clip_rect) = clip_rect {
+      context
+        .canvas
+        .clip_rect(clip_rect, skia_safe::ClipOp::Intersect, Some(true));
+    }
 
     self.element.render(context);
 

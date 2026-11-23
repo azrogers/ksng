@@ -23,7 +23,7 @@
 ✔ make hotkeys work properly @done(26-09-27 12:35)
 ☐ make zooming the timeline easier and less floaty (why does it float?)
 ☐ move audioclip text with timeline (css fixed to left)
-☐ fix slide transition
+✔ fix slide transition @done(26-11-22 23:26)
 ☐ htdemucs issue - last chunk repeats at end
 ☐ make EditableConfigUi good
 	☐ combo boxes shouldn't be so scuffed
