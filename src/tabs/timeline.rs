@@ -1,11 +1,11 @@
 use std::{
   collections::{HashMap, HashSet, hash_map::Entry},
-  sync::{Arc, RwLock},
+  sync::Arc,
 };
 
 use egui::{
-  Align2, Button, Color32, CursorIcon, FontId, Frame, ImageSource, Margin, PointerButton, Pos2,
-  Rect, Sense, Sides, Stroke, StrokeKind, TextureOptions, Ui, UiBuilder, Vec2,
+  Button, Color32, CursorIcon, FontId, Frame, ImageSource, Margin, PointerButton, Pos2, Rect,
+  Sense, Sides, Stroke, StrokeKind, TextureOptions, Ui, UiBuilder, Vec2,
 };
 use klib::{
   objects::{
@@ -18,7 +18,7 @@ use klib::{
 use uuid::Uuid;
 
 use crate::{
-  KsngContext, Logger,
+  KsngContext,
   app::AppTabInitializer,
   audio::waveform::{self, WaveformCache},
   commands::{event::SetEventTimingsCommand, track::MuteTrackCommand},
@@ -210,22 +210,22 @@ fn update_scroll(ui: &mut Ui, max_rect: Rect, scroll_pos: f32, total: f32, verti
     };
     (scroll_pos + diff / bar_size * total).clamp(0.0, max_scroll)
   } else {
-    scroll_pos
+    scroll_pos.clamp(0.0, max_scroll.max(0.0))
   }
 }
 
 impl Timeline {
   pub fn update(&mut self, app: &KsngContext, ui: &mut Ui) {
-    let zoom_delta = ui.input_mut(|input| {
+    let zoom_factor = ui.input_mut(|input| {
       if input.modifiers.alt {
-        Vec2::new(0.0, input.zoom_delta() - 1.0)
+        Vec2::new(1.0, input.zoom_delta())
       } else {
-        Vec2::new(input.zoom_delta() - 1.0, 0.0)
+        Vec2::new(input.zoom_delta(), 1.0)
       }
     });
 
     ui.input_mut(|input| {
-      if zoom_delta.length_sq() > 0.0 {
+      if zoom_factor != Vec2::splat(1.0) {
         input.smooth_scroll_delta = Vec2::ZERO;
       } else {
         input.smooth_scroll_delta = if input.modifiers.alt {
@@ -239,11 +239,24 @@ impl Timeline {
     let prev_zoom = self.zoom;
 
     self.zoom = Vec2::new(
-      (self.zoom.x + zoom_delta.x).clamp(MIN_X_ZOOM, MAX_X_ZOOM),
-      (self.zoom.y + zoom_delta.y).clamp(MIN_Y_ZOOM, MAX_Y_ZOOM),
+      (self.zoom.x * zoom_factor.x).clamp(MIN_X_ZOOM, MAX_X_ZOOM),
+      (self.zoom.y * zoom_factor.y).clamp(MIN_Y_ZOOM, MAX_Y_ZOOM),
     );
 
     let mouse_pos = ui.input(|input| input.pointer.latest_pos());
+
+    // Keep the time under the cursor fixed while zooming.
+    if self.zoom.x != prev_zoom.x
+      && let Some(cursor_pos) = mouse_pos
+    {
+      let outer_rect = ui.max_rect();
+      let content_left = outer_rect.left() + TRACK_HEADER_WIDTH + TRACK_OUTER_PADDING;
+      if outer_rect.contains(cursor_pos) && cursor_pos.x >= content_left {
+        let local_x = cursor_pos.x - content_left;
+        let ratio = self.zoom.x / prev_zoom.x;
+        self.scroll.x = ((self.scroll.x + local_x) * ratio - local_x).max(0.0);
+      }
+    }
     let is_shift = ui.input(|input| input.modifiers.shift);
 
     let track_height = TRACK_HEIGHT * self.zoom.y;
@@ -574,7 +587,10 @@ impl Timeline {
           ui.painter().rect_filled(ev_rect, 0, color);
 
           if ev.event_type == EventType::AudioClip
-            && let Some(cache) = app.waveforms.borrow().get_waveform(&project.file, ev)
+            && let Some(cache) = app
+              .waveforms
+              .borrow()
+              .get_waveform(ui.ctx(), &project.file, ev)
           {
             Self::draw_audio_event(ui, ev, ev_rect, pixels_per_second, ofs, cache);
           }
@@ -694,19 +710,10 @@ impl Timeline {
         }
       }
 
-      // Try repositioning the scroll area to put the cursor where it was
-      // before the zoom.
       if let Some(cursor_pos) = ui.input(|input| input.pointer.latest_pos()) {
         let content_pos_x = cursor_pos.x - max_rect.left() + scroll_x;
         let cursor_pos_s = content_pos_x / pixels_per_second;
-        if (self.zoom.x - prev_zoom.x).abs() > 0.0 && max_rect.contains(cursor_pos) {
-          let prev_pps = PIXELS_PER_SECOND * prev_zoom.x;
-          let prev_pos_s = content_pos_x / prev_pps;
-          let new_pos_s = content_pos_x / pixels_per_second;
-          let diff_pixels = (new_pos_s - prev_pos_s) * pixels_per_second;
-          self.scroll.x -= diff_pixels;
-          self.scroll.x = self.scroll.x.max(0.0);
-        } else if self.state == TimelineUiState::Scrubbing && !track_clicked {
+        if self.state == TimelineUiState::Scrubbing && !track_clicked {
           app
             .playback
             .borrow_mut()
@@ -742,12 +749,9 @@ impl Timeline {
     ev_rect: Rect,
     pixels_per_second: f32,
     ofs: f32,
-    cache: Arc<RwLock<WaveformCache>>,
+    cache: Arc<WaveformCache>,
   ) {
-    let mut cache_ref = cache.write().unwrap();
-    let Some(info) = Logger::wrap(cache_ref.info()) else {
-      return;
-    };
+    let info = cache.info();
     let audio_offset = match &ev.value {
       Some(EventValue::AudioClip { offset, .. }) => offset.to_seconds(),
       _ => 0.0,
@@ -766,7 +770,6 @@ impl Timeline {
     let pixel_to_s = info.pixel_to_s[mip_level];
     let imgs_per_level = info.imgs_per_level[mip_level];
     let duration = info.duration;
-    drop(cache_ref);
     let image_duration = pixel_to_s * waveform::MAX_TEXTURE_SIZE as f32;
     // we know that all of the images span from ev_rect.left() to
     // ev_rect.right() and that each individual image takes
@@ -787,16 +790,11 @@ impl Timeline {
         continue;
       }
 
-      if let Some((uri, bytes)) = Logger::wrap(cache.write().unwrap().load_entry(mip_level, i)) {
-        let image = egui::Image::new(ImageSource::Bytes {
-          uri: uri.into(),
-          bytes,
-        })
+      egui::Image::new(ImageSource::Uri(cache.image_uri(mip_level, i).into()))
         .texture_options(TextureOptions::NEAREST)
         .show_loading_spinner(false)
-        .tint(Color32::from_black_alpha(127));
-        image.paint_at(ui, img_rect);
-      }
+        .tint(Color32::from_black_alpha(127))
+        .paint_at(ui, img_rect);
     }
     ui.set_clip_rect(prev_clip_rect);
   }
@@ -804,13 +802,16 @@ impl Timeline {
   fn draw_event_text_impl(ui: &mut Ui, rect: &Rect, text: &str) {
     let font = FontId::proportional(12.0);
     let inner_rect = rect.expand2(Vec2::new(2.0, 2.0));
-    ui.painter().with_clip_rect(inner_rect).text(
-      Pos2::new(rect.min.x + 2.0, rect.min.y + 2.0),
-      Align2::LEFT_TOP,
-      text,
-      font,
-      Color32::WHITE,
-    );
+    let painter = ui.painter().with_clip_rect(inner_rect);
+    let galley = painter.layout_no_wrap(text.to_owned(), font, Color32::WHITE);
+    // Stick the text to the left edge of the visible area, but don't let it
+    // slide past the right edge of the event (like CSS `position: sticky`).
+    // Use the clip rect rather than max_rect: allocate_rect() grows max_rect to
+    // include off-screen events, but the clip rect stays at the visible area.
+    let visible_left = ui.clip_rect().left();
+    let max_x = (rect.max.x - galley.size().x - 2.0).max(rect.min.x + 2.0);
+    let x = (visible_left + 2.0).clamp(rect.min.x + 2.0, max_x);
+    painter.galley(Pos2::new(x, rect.min.y + 2.0), galley, Color32::WHITE);
   }
 
   fn create_event_text(file: &File, event: &Event) -> String {

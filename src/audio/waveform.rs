@@ -1,12 +1,16 @@
 use std::{
-  collections::{HashMap, LinkedList},
-  io::Read,
+  collections::HashMap,
+  io::{Cursor, Read, Seek, SeekFrom},
   path::{Path, PathBuf},
-  sync::{Arc, RwLock},
+  sync::{Arc, Mutex, RwLock, mpsc},
+  task::Poll,
   thread,
 };
 
-use egui::{Context, load::Bytes};
+use egui::{
+  Context,
+  load::{Bytes, BytesLoadResult, BytesLoader, BytesPoll, LoadError},
+};
 use klib::objects::{
   attachment::{AttachmentReader, AttachmentResolver, AttachmentSource},
   audio::AudioFileSource,
@@ -84,55 +88,6 @@ impl WaveformResult {
     }
 
     Ok(())
-  }
-
-  pub fn load_info_from_archive(path: &Path) -> Result<WaveformCacheInfo, UiError> {
-    let reader = std::fs::File::open(path)?;
-    let mut ar = Archive::new(reader);
-    let Some(Ok(mut shape_entry)) = ar.entries()?.next() else {
-      return Err(UiError::Audio(format!(
-        "Failed to load info from archive for {path:?}"
-      )));
-    };
-
-    let levels = shape_entry.read_le::<u8>()? as usize;
-    let duration = shape_entry.read_le::<f32>()?;
-    let mut levels_vec = Vec::with_capacity(levels);
-    let mut pixel_to_s = Vec::with_capacity(levels);
-    for _ in 0..levels {
-      let images = shape_entry.read_le::<u16>()? as usize;
-      levels_vec.push(images);
-      let pxs = shape_entry.read_le::<f32>()?;
-      pixel_to_s.push(pxs);
-    }
-
-    Ok(WaveformCacheInfo {
-      levels,
-      imgs_per_level: levels_vec,
-      pixel_to_s,
-      duration,
-    })
-  }
-
-  pub fn load_img_from_archive(path: &Path, level: usize, idx: usize) -> Result<Vec<u8>, UiError> {
-    let reader = std::fs::File::open(path)?;
-    let mut ar = Archive::new(reader);
-    let target_name = format!("mip-l{level}-i{idx}.png");
-
-    for entry in ar.entries_with_seek()? {
-      let mut entry = entry?;
-      if let Some(name) = entry.path()?.file_name().and_then(|s| s.to_str())
-        && name == target_name
-      {
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut buf)?;
-        return Ok(buf);
-      }
-    }
-
-    Err(UiError::Audio(format!(
-      "Could not find mip level {level} idx {idx} at path {path:?}"
-    )))
   }
 }
 
@@ -250,91 +205,299 @@ impl WaveformGenerator {
   }
 }
 
-const MAX_ENTRIES: usize = 32;
-
-struct WaveformCacheEntry {
-  level: usize,
-  idx: usize,
-  uri: String,
-  bytes: Bytes,
+/// Location of one image inside a waveform archive.
+#[derive(Clone, Copy)]
+struct ArchiveSpan {
+  offset: u64,
+  size: u64,
 }
 
 pub struct WaveformCache {
-  name: String,
-  source: PathBuf,
-  entries: LinkedList<WaveformCacheEntry>,
-  info: Option<WaveformCacheInfo>,
+  id: Uuid,
+  info: WaveformCacheInfo,
+  /// Indexed by `[level][idx]`.
+  index: Vec<Vec<Option<ArchiveSpan>>>,
+  file: Mutex<std::fs::File>,
 }
 
 impl WaveformCache {
-  pub fn new(name: String, source: PathBuf) -> WaveformCache {
-    WaveformCache {
-      name,
-      source,
-      entries: Default::default(),
-      info: None,
+  /// Opens and indexes the archive at `path`
+  fn open(id: Uuid, path: &Path) -> Result<WaveformCache, UiError> {
+    let data = std::fs::read(path)?;
+    let mut ar = Archive::new(Cursor::new(data.as_slice()));
+    let mut entries = ar.entries_with_seek()?;
+
+    let Some(Ok(mut shape_entry)) = entries.next() else {
+      return Err(UiError::Audio(format!(
+        "Failed to load info from archive for {path:?}"
+      )));
+    };
+    let levels = shape_entry.read_le::<u8>()? as usize;
+    let duration = shape_entry.read_le::<f32>()?;
+    let mut imgs_per_level = Vec::with_capacity(levels);
+    let mut pixel_to_s = Vec::with_capacity(levels);
+    for _ in 0..levels {
+      imgs_per_level.push(shape_entry.read_le::<u16>()? as usize);
+      pixel_to_s.push(shape_entry.read_le::<f32>()?);
     }
-  }
+    drop(shape_entry);
 
-  /// Returns the number of mipmaps and the number of images per mipmap.
-  pub fn info(&mut self) -> Result<&WaveformCacheInfo, UiError> {
-    if self.info.is_none() {
-      self.info = Some(WaveformResult::load_info_from_archive(&self.source)?);
-    }
-
-    Ok(self.info.as_ref().unwrap())
-  }
-
-  /// Loads the given mip level and image index into the cache, returning its
-  /// data.
-  pub fn load_entry(&mut self, level: usize, idx: usize) -> Result<(String, Bytes), UiError> {
-    for entry in &self.entries {
-      if entry.level == level && entry.idx == idx {
-        return Ok((entry.uri.clone(), entry.bytes.clone()));
+    let mut index: Vec<Vec<Option<ArchiveSpan>>> =
+      imgs_per_level.iter().map(|&n| vec![None; n]).collect();
+    for entry in entries {
+      let entry = entry?;
+      let entry_path = entry.path()?;
+      let Some((level, idx)) = entry_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .and_then(parse_image_name)
+      else {
+        continue;
+      };
+      if let Some(slot) = index.get_mut(level).and_then(|l| l.get_mut(idx)) {
+        *slot = Some(ArchiveSpan {
+          offset: entry.raw_file_position(),
+          size: entry.size(),
+        });
       }
     }
 
-    let data = WaveformResult::load_img_from_archive(&self.source, level, idx)?;
-    self.entries.push_front(WaveformCacheEntry {
-      uri: format!("bytes://{}_mip_l{}_i{}.png", self.name, level, idx),
-      level,
-      idx,
-      bytes: Bytes::from(data),
-    });
-
-    while self.entries.len() > MAX_ENTRIES {
-      self.entries.pop_back();
-    }
-
-    let first = self.entries.front().unwrap();
-    Ok((first.uri.clone(), first.bytes.clone()))
+    Ok(WaveformCache {
+      id,
+      info: WaveformCacheInfo {
+        levels,
+        imgs_per_level,
+        pixel_to_s,
+        duration,
+      },
+      index,
+      file: Mutex::new(std::fs::File::open(path)?),
+    })
   }
+
+  /// The number of mipmaps and the number of images per mipmap.
+  pub fn info(&self) -> &WaveformCacheInfo {
+    &self.info
+  }
+
+  /// URI for the given image for `WaveformBytesLoader`.
+  pub fn image_uri(&self, level: usize, idx: usize) -> String {
+    format!("{URI_SCHEME}{}/l{level}-i{idx}.png", self.id)
+  }
+
+  fn all_image_uris(&self) -> impl Iterator<Item = String> + '_ {
+    self
+      .info
+      .imgs_per_level
+      .iter()
+      .enumerate()
+      .flat_map(move |(level, &n)| (0..n).map(move |idx| self.image_uri(level, idx)))
+  }
+
+  /// Reads one PNG out of the archive.
+  fn read_image(&self, level: usize, idx: usize) -> Result<Vec<u8>, UiError> {
+    let span = self
+      .index
+      .get(level)
+      .and_then(|l| l.get(idx))
+      .copied()
+      .flatten()
+      .ok_or_else(|| {
+        UiError::Audio(format!(
+          "Could not find mip level {level} idx {idx} for waveform {}",
+          self.id
+        ))
+      })?;
+    let mut buf = vec![0; span.size as usize];
+    let mut file = self.file.lock().unwrap();
+    file.seek(SeekFrom::Start(span.offset))?;
+    file.read_exact(&mut buf)?;
+    Ok(buf)
+  }
+}
+
+/// Parses `mip-l{level}-i{idx}.png`.
+fn parse_image_name(name: &str) -> Option<(usize, usize)> {
+  let (level, idx) = name
+    .strip_prefix("mip-l")?
+    .strip_suffix(".png")?
+    .split_once("-i")?;
+  Some((level.parse().ok()?, idx.parse().ok()?))
+}
+
+const URI_SCHEME: &str = "waveform://";
+
+/// Parses `waveform://{uuid}/l{level}-i{idx}.png`.
+fn parse_image_uri(uri: &str) -> Option<(Uuid, usize, usize)> {
+  let (id, rest) = uri.strip_prefix(URI_SCHEME)?.split_once('/')?;
+  let (level, idx) = rest
+    .strip_prefix('l')?
+    .strip_suffix(".png")?
+    .split_once("-i")?;
+  Some((
+    Uuid::parse_str(id).ok()?,
+    level.parse().ok()?,
+    idx.parse().ok()?,
+  ))
 }
 
 enum WaveformState {
   Loading,
-  Loaded(Arc<RwLock<WaveformCache>>),
+  Loaded(Arc<WaveformCache>),
   Failed,
 }
 
 type WaveformsMap = Arc<RwLock<HashMap<Uuid, WaveformState>>>;
 
+type LoadedBytes = HashMap<String, Poll<Result<Bytes, String>>>;
+
+struct ReadJob {
+  uri: String,
+  cache: Arc<WaveformCache>,
+  level: usize,
+  idx: usize,
+  ctx: Context,
+}
+
+/// egui bytes loader for `waveform://` URIs.
+pub struct WaveformBytesLoader {
+  waveforms: WaveformsMap,
+  loaded: Arc<Mutex<LoadedBytes>>,
+  jobs: mpsc::Sender<ReadJob>,
+}
+
+impl WaveformBytesLoader {
+  pub const ID: &'static str = egui::generate_loader_id!(WaveformBytesLoader);
+
+  fn new(waveforms: WaveformsMap) -> WaveformBytesLoader {
+    let loaded: Arc<Mutex<LoadedBytes>> = Default::default();
+    let (jobs, rx) = mpsc::channel::<ReadJob>();
+    let worker_loaded = loaded.clone();
+    thread::Builder::new()
+      .name("waveform-reader".to_owned())
+      .spawn(move || {
+        for job in rx {
+          let result = job
+            .cache
+            .read_image(job.level, job.idx)
+            .map(Bytes::from)
+            .map_err(|e| format!("{e:?}"));
+          // Only store the result if the URI wasn't forgotten in the meantime.
+          if let Some(slot) = worker_loaded.lock().unwrap().get_mut(&job.uri) {
+            *slot = Poll::Ready(result);
+          }
+          job.ctx.request_repaint();
+        }
+      })
+      .expect("failed to spawn waveform reader thread");
+
+    WaveformBytesLoader {
+      waveforms,
+      loaded,
+      jobs,
+    }
+  }
+}
+
+impl BytesLoader for WaveformBytesLoader {
+  fn id(&self) -> &str {
+    Self::ID
+  }
+
+  fn load(&self, ctx: &Context, uri: &str) -> BytesLoadResult {
+    let Some((id, level, idx)) = parse_image_uri(uri) else {
+      return Err(LoadError::NotSupported);
+    };
+
+    let mut loaded = self.loaded.lock().unwrap();
+    match loaded.get(uri) {
+      Some(Poll::Ready(Ok(bytes))) => {
+        return Ok(BytesPoll::Ready {
+          size: None,
+          bytes: bytes.clone(),
+          mime: Some("image/png".to_owned()),
+        });
+      }
+      Some(Poll::Ready(Err(e))) => return Err(LoadError::Loading(e.clone())),
+      Some(Poll::Pending) => return Ok(BytesPoll::Pending { size: None }),
+      None => {}
+    }
+
+    let cache = match self.waveforms.read().unwrap().get(&id) {
+      Some(WaveformState::Loaded(cache)) => cache.clone(),
+      _ => {
+        return Err(LoadError::Loading(format!("Waveform {id} is not loaded")));
+      }
+    };
+    loaded.insert(uri.to_owned(), Poll::Pending);
+    drop(loaded);
+
+    let job = ReadJob {
+      uri: uri.to_owned(),
+      cache,
+      level,
+      idx,
+      ctx: ctx.clone(),
+    };
+    if self.jobs.send(job).is_err() {
+      self.loaded.lock().unwrap().remove(uri);
+      return Err(LoadError::Loading(
+        "Waveform reader thread has stopped".to_owned(),
+      ));
+    }
+    Ok(BytesPoll::Pending { size: None })
+  }
+
+  fn forget(&self, uri: &str) {
+    self.loaded.lock().unwrap().remove(uri);
+  }
+
+  fn forget_all(&self) {
+    self.loaded.lock().unwrap().clear();
+  }
+
+  fn byte_size(&self) -> usize {
+    self
+      .loaded
+      .lock()
+      .unwrap()
+      .values()
+      .map(|v| match v {
+        Poll::Ready(Ok(bytes)) => bytes.len(),
+        _ => 0,
+      })
+      .sum()
+  }
+
+  fn has_pending(&self) -> bool {
+    self.loaded.lock().unwrap().values().any(Poll::is_pending)
+  }
+}
+
 pub struct AudioWaveformProvider {
   waveforms: WaveformsMap,
+  bytes_loader: Arc<WaveformBytesLoader>,
 }
 
 impl AudioWaveformProvider {
   pub fn new() -> AudioWaveformProvider {
+    let waveforms: WaveformsMap = Default::default();
     AudioWaveformProvider {
-      waveforms: Default::default(),
+      bytes_loader: Arc::new(WaveformBytesLoader::new(waveforms.clone())),
+      waveforms,
     }
+  }
+
+  /// Loader for `waveform://` URIs.
+  pub fn bytes_loader(&self) -> Arc<WaveformBytesLoader> {
+    self.bytes_loader.clone()
   }
 
   pub fn clear(&mut self, ctx: &Context) {
     for v in self.waveforms.read().unwrap().values() {
       if let WaveformState::Loaded(cache) = &v {
-        for entry in &cache.read().unwrap().entries {
-          ctx.forget_image(&entry.uri);
+        for uri in cache.all_image_uris() {
+          ctx.forget_image(&uri);
         }
       }
     }
@@ -344,9 +507,10 @@ impl AudioWaveformProvider {
 
   pub fn get_waveform(
     &self,
+    ctx: &Context,
     project_file: &File,
     event: &Event,
-  ) -> Option<Arc<RwLock<WaveformCache>>> {
+  ) -> Option<Arc<WaveformCache>> {
     if let Some(state) = self.waveforms.read().ok()?.get(&event.id) {
       return match state {
         WaveformState::Loading | WaveformState::Failed => None,
@@ -356,16 +520,8 @@ impl AudioWaveformProvider {
 
     let cache_path = Cache::get_file_path(event.id, "tar").ok()?;
     if std::fs::exists(&cache_path).unwrap_or(false) {
-      let cache = Arc::new(RwLock::new(WaveformCache::new(
-        event.id.to_string(),
-        cache_path,
-      )));
-      self
-        .waveforms
-        .write()
-        .ok()?
-        .insert(event.id, WaveformState::Loaded(cache.clone()));
-      return Some(cache);
+      self.load_waveform(ctx, event.id, None);
+      return None;
     }
 
     let resolver = KsngAttachmentResolver {};
@@ -388,12 +544,7 @@ impl AudioWaveformProvider {
     });
 
     if let Some(path) = audio_path {
-      self
-        .waveforms
-        .write()
-        .ok()?
-        .insert(event.id, WaveformState::Loading);
-      self.load_waveform(event.id, path);
+      self.load_waveform(ctx, event.id, Some(path));
     } else {
       error!("Failed to load audio file ID {}, no path found", event.id);
       self
@@ -405,32 +556,37 @@ impl AudioWaveformProvider {
     None
   }
 
-  fn load_waveform(&self, id: Uuid, path: PathBuf) {
+  /// Opens the waveform archive for `id` on a background thread, loading it
+  /// from `audio_path` if supplied and no cache present.
+  fn load_waveform(&self, ctx: &Context, id: Uuid, audio_path: Option<PathBuf>) {
+    if let Ok(mut waveforms) = self.waveforms.write() {
+      waveforms.insert(id, WaveformState::Loading);
+    }
     let waveforms = self.waveforms.clone();
+    let ctx = ctx.clone();
     thread::spawn(move || {
-      let path = Logger::wrap(Self::load_waveform_impl(id, path));
-      let mut waveforms = waveforms.write().ok();
-      if let Some(waveforms) = waveforms.as_mut() {
-        if let Some(cache) = path {
-          waveforms.insert(id, WaveformState::Loaded(cache));
-        } else {
-          waveforms.insert(id, WaveformState::Failed);
-        }
+      let cache = Logger::wrap(Self::load_waveform_impl(id, audio_path));
+      if let Ok(mut waveforms) = waveforms.write() {
+        let state = match cache {
+          Some(cache) => WaveformState::Loaded(Arc::new(cache)),
+          None => WaveformState::Failed,
+        };
+        waveforms.insert(id, state);
       }
+      ctx.request_repaint();
     });
   }
 
-  fn load_waveform_impl(id: Uuid, path: PathBuf) -> Result<Arc<RwLock<WaveformCache>>, UiError> {
-    let generator = WaveformGenerator {
-      height: timeline::TRACK_HEIGHT as usize,
-      mip_levels: 8,
-    };
-    let buffer = generator.create_waveform(path.as_ref())?;
+  fn load_waveform_impl(id: Uuid, audio_path: Option<PathBuf>) -> Result<WaveformCache, UiError> {
     let cache_file = Cache::get_file_path(id, "tar")?;
-    buffer.save_to_archive(&cache_file)?;
-    Ok(Arc::new(RwLock::new(WaveformCache::new(
-      id.to_string(),
-      cache_file,
-    ))))
+    if let Some(audio_path) = audio_path {
+      let generator = WaveformGenerator {
+        height: timeline::TRACK_HEIGHT as usize,
+        mip_levels: 8,
+      };
+      let buffer = generator.create_waveform(audio_path.as_ref())?;
+      buffer.save_to_archive(&cache_file)?;
+    }
+    WaveformCache::open(id, &cache_file)
   }
 }

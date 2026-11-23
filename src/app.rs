@@ -65,6 +65,8 @@ impl KsngApp {
     }
 
     egui_extras::install_image_loaders(&cc.egui_ctx);
+    cc.egui_ctx
+      .add_bytes_loader(app.context.waveforms.borrow().bytes_loader());
 
     app
   }
