@@ -1,7 +1,7 @@
-use std::collections::HashSet;
-
 use klib_macros::EditableConfig;
 use serde::{Deserialize, Serialize};
+
+use crate::fonts::Font;
 
 /// A 32-bit RGBA color.
 #[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Debug)]
@@ -55,124 +55,6 @@ impl From<Color32> for skia_safe::Color4f {
   fn from(value: Color32) -> Self {
     let floats = value.to_floats();
     skia_safe::Color4f::new(floats[0], floats[1], floats[2], floats[3])
-  }
-}
-
-/// We have to copy all the parley font structs so they can be serde'd
-
-#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Default, Debug)]
-pub enum FontStyle {
-  /// An upright or "roman" style.
-  #[default]
-  Normal,
-  /// Generally a slanted style, originally based on semi-cursive forms.
-  /// This often has a different structure from the normal style.
-  Italic,
-  Oblique,
-}
-
-impl From<FontStyle> for skia_safe::font_style::Slant {
-  fn from(value: FontStyle) -> Self {
-    match value {
-      FontStyle::Normal => skia_safe::font_style::Slant::Upright,
-      FontStyle::Italic => skia_safe::font_style::Slant::Italic,
-      FontStyle::Oblique => skia_safe::font_style::Slant::Oblique,
-    }
-  }
-}
-
-/// Visual weight class of a font, typically on a scale from 1 to 1000.
-#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, PartialOrd, Debug)]
-pub struct FontWeight(pub i32);
-
-impl From<FontWeight> for skia_safe::font_style::Weight {
-  fn from(value: FontWeight) -> Self {
-    skia_safe::font_style::Weight::from(value.0)
-  }
-}
-
-/// Visual width of a font
-#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, PartialOrd, Debug)]
-pub struct FontWidth(pub i32);
-
-impl From<FontWidth> for skia_safe::font_style::Width {
-  fn from(value: FontWidth) -> Self {
-    skia_safe::font_style::Width::from(value.0)
-  }
-}
-
-/// A font with configuration options.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Font {
-  pub style: FontStyle,
-  pub weight: FontWeight,
-  pub width: FontWidth,
-  pub family: String,
-  pub size: f32,
-}
-
-impl Font {
-  pub fn to_skfont(&self, font_mgr: &skia_safe::FontMgr) -> Option<skia_safe::Font> {
-    let style = skia_safe::FontStyle::new(self.weight.into(), self.width.into(), self.style.into());
-    let typeface = font_mgr.match_family_style(&self.family, style)?;
-    Some(skia_safe::Font::new(typeface, Some(self.size)))
-  }
-}
-
-impl Default for Font {
-  fn default() -> Self {
-    Self {
-      style: FontStyle::Normal,
-      weight: FontWeight(700),
-      width: FontWidth(5),
-      family: "Arial".to_string(),
-      size: 100.0,
-    }
-  }
-}
-
-pub struct FontManager {
-  font_mgr: skia_safe::FontMgr,
-  family_names: Vec<String>,
-}
-
-impl Default for FontManager {
-  fn default() -> Self {
-    let font_mgr = skia_safe::FontMgr::new();
-    let mut family_names: Vec<String> = font_mgr.family_names().collect();
-    family_names.sort();
-    Self {
-      font_mgr,
-      family_names,
-    }
-  }
-}
-
-#[derive(Debug)]
-pub struct FontInfo {
-  pub widths: Vec<i32>,
-  pub weights: Vec<i32>,
-}
-
-impl FontManager {
-  pub fn font_names(&self) -> &[String] {
-    self.family_names.as_slice()
-  }
-
-  pub fn font_info(&self, name: &str) -> FontInfo {
-    let mut style_set = self.font_mgr.match_family(name);
-    let mut widths: HashSet<i32> = Default::default();
-    let mut weights: HashSet<i32> = Default::default();
-    for i in 0..style_set.count() {
-      let (style_info, _) = style_set.style(i);
-      widths.insert(*style_info.width());
-      weights.insert(*style_info.weight());
-    }
-    let mut widths: Vec<i32> = widths.into_iter().collect();
-    widths.sort();
-    let mut weights: Vec<i32> = weights.into_iter().collect();
-    weights.sort();
-    FontInfo { widths, weights }
   }
 }
 

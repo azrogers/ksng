@@ -1,8 +1,4 @@
-use crate::{
-  style::{Color32, Font},
-  timecode::Timecode,
-  Rect,
-};
+use crate::{fonts::Font, style::Color32, timecode::Timecode, Rect};
 
 pub trait EditableConfig {
   fn edit(&mut self, ui: &mut dyn EditableConfigUi) -> bool;

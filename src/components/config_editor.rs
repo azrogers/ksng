@@ -1,6 +1,7 @@
 use egui::{Checkbox, ComboBox, DragValue, Slider, TextEdit, Ui};
 use klib::{
-  style::{Color32, FontManager, FontStyle},
+  fonts::FontStyle,
+  style::Color32,
   timecode::Timecode,
   util::editable_config::{EditableConfig, EditableConfigUi},
 };
@@ -39,16 +40,11 @@ static TIMECODE_REGEX: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new
 struct EguiEditableConfigUi<'ui> {
   ui: &'ui mut Ui,
   id: String,
-  font_mgr: FontManager,
 }
 
 impl<'ui> EguiEditableConfigUi<'ui> {
   pub fn new(ui: &'ui mut Ui, id: String) -> EguiEditableConfigUi<'ui> {
-    EguiEditableConfigUi {
-      ui,
-      id,
-      font_mgr: FontManager::default(),
-    }
+    EguiEditableConfigUi { ui, id }
   }
 }
 
@@ -237,7 +233,7 @@ impl<'ui> EditableConfigUi for EguiEditableConfigUi<'ui> {
     new_value
   }
 
-  fn font(&mut self, key: &str, changed: &mut bool, value: klib::style::Font) -> klib::style::Font {
+  fn font(&mut self, key: &str, changed: &mut bool, value: klib::fonts::Font) -> klib::fonts::Font {
     let mut new_value = value.clone();
     config_row(key, self.ui, |ui| {
       ui.vertical(|ui| {
@@ -245,14 +241,14 @@ impl<'ui> EditableConfigUi for EguiEditableConfigUi<'ui> {
         ComboBox::new(format!("{}_{}_family", self.id, key), "Family")
           .selected_text(&new_value.family)
           .show_ui(ui, |ui| {
-            for value in self.font_mgr.font_names() {
+            for value in klib::fonts::FontManager::current().font_names() {
               ui.selectable_value(&mut new_value.family, value.clone(), value);
             }
           });
         if new_value.family != prev_family_name {
           *changed = true;
         }
-        let info = self.font_mgr.font_info(&new_value.family);
+        let info = klib::fonts::FontManager::current().font_info(&new_value.family);
         let prev_weight = new_value.weight.0;
         ComboBox::new(format!("{}_{}_weight", self.id, key), "Weight")
           .selected_text(FONT_WEIGHT_NAMES[(new_value.weight.0 / 100) as usize])

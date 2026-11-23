@@ -46,16 +46,15 @@ fn layout_lyrics_track(track: &Track, video_config: &VideoConfig) -> Vec<Box<dyn
     _ => &default_track_config,
   };
 
-  let mut context = LyricsTrackContext {
-    area: Rect {
+  let mut context = LyricsTrackContext::new(
+    Rect {
       x0: video_config.width * track_config.bounds.x0,
       y0: video_config.height * track_config.bounds.y0,
       x1: video_config.width * track_config.bounds.x1,
       y1: video_config.height * track_config.bounds.y1,
     },
-    style: &track_config.style,
-    font_mgr: skia_safe::FontMgr::new(),
-  };
+    &track_config.style,
+  );
 
   let elements = match track_config.layout {
     LyricsTrackLayoutMode::Paragraph { merger_mode } => {

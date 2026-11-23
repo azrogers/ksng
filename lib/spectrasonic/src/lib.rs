@@ -6,6 +6,8 @@ pub mod error;
 pub mod filters;
 pub mod info;
 pub mod sources;
+#[cfg(test)]
+pub(crate) mod test_util;
 
 pub use buffer::PlanarAudioBuffer;
 pub use chain::{AudioChain, AudioFilter, AudioSource};

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use skia_safe::{GlyphId, Matrix};
 
 use crate::{
+  fonts::FontManager,
   objects::{
     event::{Event, EventType},
     track::{Track, TrackType},
@@ -50,7 +51,7 @@ impl ParagraphLayout {
       return vec![];
     }
 
-    let Some(font) = context.style.font.to_skfont(&context.font_mgr) else {
+    let Some(font) = FontManager::current().skfont(&context.style.font) else {
       log::warn!(
         "Couldn't create font {:?}, skipping layout",
         context.style.font
@@ -231,7 +232,7 @@ impl ParagraphLayout {
             first_on_line = false;
           }
 
-          if (next_y + line_box_height) > rect.y1 {
+          if (next_y + line_box_height) > rect.y1 && !out_elements.is_empty() {
             // Paragraph done
             idx -= 1;
             break;
@@ -365,5 +366,79 @@ impl ParagraphLayout {
     }
 
     builder.to_rect().unwrap_or_default()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::{sync::mpsc, time::Duration};
+
+  use super::{ParagraphLayout, ParagraphMergerMode};
+  use crate::{
+    fonts::DEFAULT_FONT_FAMILY,
+    objects::{event::Event, track::Track},
+    style::LyricsTrackStyle,
+    timecode::Timecode,
+    video::context::LyricsTrackContext,
+    Rect,
+  };
+
+  const HANG_TIMEOUT: Duration = Duration::from_secs(10);
+
+  /// Lays out a lyrics track with one lyric per word in `area`. Panics if
+  /// layout doesn't finish in `HANG_TIMEOUT`.
+  fn layout_words(area: Rect, font_size: f32, words: &'static [&'static str]) -> usize {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+      let mut style = LyricsTrackStyle::default();
+      style.font.family = DEFAULT_FONT_FAMILY.to_string();
+      style.font.size = font_size;
+
+      let mut track = Track::new_lyrics(0);
+      for (i, word) in words.iter().enumerate() {
+        let start = Timecode(i as u32 * 1000);
+        let end = Timecode((i as u32 + 1) * 1000);
+        track
+          .events
+          .insert(Event::new_lyric(start, end, word.to_string()));
+      }
+
+      let mut context = LyricsTrackContext::new(area, &style);
+      let layout = ParagraphLayout::new(ParagraphMergerMode::Page);
+      let _ = tx.send(layout.layout_track(&mut context, &track).len());
+    });
+
+    match rx.recv_timeout(HANG_TIMEOUT) {
+      Ok(n) => n,
+      Err(mpsc::RecvTimeoutError::Timeout) => {
+        panic!("layout_track did not finish within {HANG_TIMEOUT:?} (hang)")
+      }
+      Err(mpsc::RecvTimeoutError::Disconnected) => panic!("layout_track panicked"),
+    }
+  }
+
+  // Control test
+  #[test]
+  fn layout_fits_in_large_area() {
+    let area = Rect {
+      x0: 0.0,
+      y0: 0.0,
+      x1: 1920.0,
+      y1: 1080.0,
+    };
+    let n = layout_words(area, 100.0, &["hello", "world"]);
+    assert!(n > 0, "expected at least one paragraph element");
+  }
+
+  // Test for bug where layout hangs if no text can be laid out within the area.
+  #[test]
+  fn layout_terminates_when_line_taller_than_area() {
+    let area = Rect {
+      x0: 0.0,
+      y0: 0.0,
+      x1: 1920.0,
+      y1: 20.0,
+    };
+    layout_words(area, 100.0, &["hello", "world"]);
   }
 }

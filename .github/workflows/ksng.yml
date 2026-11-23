@@ -50,7 +50,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --lib --features=build-ffmpeg
+          args: --workspace --lib --features=ksng/build-ffmpeg
 
   fmt:
     name: Rustfmt

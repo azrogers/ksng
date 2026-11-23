@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub mod audio;
 pub mod config;
 pub mod error;
+pub mod fonts;
 pub mod objects;
 pub mod style;
 pub mod timecode;
