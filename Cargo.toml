@@ -66,6 +66,10 @@ opt-level = 2 # fast and small wasm
 [profile.dev.package."*"]
 opt-level = 2
 
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+
 [workspace]
 resolver = "2"
 members = [".", "lib/klib", "lib/klib-macros", "lib/ksng-ml", "lib/ksng-ml-ipc", "lib/spectrasonic"]

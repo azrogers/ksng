@@ -9,10 +9,6 @@ pub mod text;
 pub struct VideoElementRenderContext<'canvas> {
   pub time: Timecode,
   pub canvas: &'canvas skia_safe::Canvas,
-  /// Scratch surface used for transitions.
-  ///
-  /// TODO: find a way to pass this to transitions and not to everything else
-  pub scratch_surface: Option<&'canvas mut skia_safe::Surface>,
 }
 
 /// A video element is an renderable item with a position and a start and end

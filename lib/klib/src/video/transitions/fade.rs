@@ -1,6 +1,5 @@
 use klib_macros::EditableConfig;
 use serde::{Deserialize, Serialize};
-use skia_safe::Color4f;
 
 use crate::{
   timecode::Timecode,
@@ -100,15 +99,6 @@ impl VideoElement for FadeTransitionElement {
   }
 
   fn render<'canvas>(&self, context: &mut VideoElementRenderContext<'canvas>) {
-    let scratch_canvas = context.scratch_surface.as_mut().unwrap().canvas();
-    scratch_canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
-
-    self.element.render(&mut VideoElementRenderContext {
-      time: context.time,
-      canvas: scratch_canvas,
-      scratch_surface: None,
-    });
-
     let t = {
       let p = context.time;
       let ts = self.element.start_time();
@@ -134,13 +124,22 @@ impl VideoElement for FadeTransitionElement {
       }
     };
 
-    let paint = skia_safe::Paint::new(Color4f::new(1.0, 1.0, 1.0, t), None);
+    if t <= 0.0 {
+      return;
+    }
 
-    context.scratch_surface.as_mut().unwrap().draw(
-      context.canvas,
-      skia_safe::Point::default(),
-      skia_safe::SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::Linear),
-      Some(&paint),
-    );
+    if t >= 1.0 {
+      self.element.render(context);
+      return;
+    }
+
+    let bounds: skia_safe::Rect = self.element.bounds().into();
+    let (bounds, _) = self.element.transform().map_rect(bounds);
+    let pad = bounds.height() * 0.5;
+    let layer_bounds = bounds.with_outset((pad, pad));
+
+    context.canvas.save_layer_alpha_f(layer_bounds, t);
+    self.element.render(context);
+    context.canvas.restore();
   }
 }

@@ -16,6 +16,10 @@ fn main() {
       panic!("You must set your `FFMPEG_DIR` to a path containing the FFMPEG dll/so/dylib files");
     };
 
+    if !std::fs::exists(&out_dir).unwrap() {
+      std::fs::create_dir_all(&out_dir).unwrap();
+    }
+
     println!("copying ffmpeg libs from {ffmpeg_dir} to {out_dir:?}");
 
     let ffmpeg_dir = PathBuf::from_str(&ffmpeg_dir).unwrap();

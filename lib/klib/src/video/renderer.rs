@@ -35,14 +35,9 @@ impl VideoRenderer {
 
     canvas.clear(video_config.base_color);
 
-    let mut scratch = canvas
-      .new_surface(&canvas.image_info(), None)
-      .ok_or(Error::Skia("Failed to create scratch surface".to_string()))?;
-
     let mut render_context = VideoElementRenderContext {
       time,
       canvas: &canvas,
-      scratch_surface: Some(&mut scratch),
     };
 
     for element in sequence.elements_for_time(time) {
