@@ -79,11 +79,14 @@ impl Data {
       .entries
       .sort_by_key(|b| std::cmp::Reverse(b.last_modified));
 
-    Data::save_manifest(&root_dir, &manifest)?;
-
     let project_dir = Data::get_or_create_project_dir(&root_dir, project.id)?;
-    let project_file = std::fs::File::create(project_dir.join("project.kpj"))?;
+    let project_file_path = project_dir.join("project.kpj");
+    let project_file_temp = project_dir.join("project.kpj.tmp");
+    let project_file = std::fs::File::create(&project_file_temp)?;
     project.file.write_to_file(project_file)?;
+
+    std::fs::rename(&project_file_temp, &project_file_path)?;
+    Data::save_manifest(&root_dir, &manifest)?;
 
     Ok(())
   }

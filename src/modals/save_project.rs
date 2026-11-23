@@ -10,7 +10,11 @@ pub struct SaveProjectModal {
 
 impl SaveProjectModal {
   pub fn save(app: &KsngContext, after: Option<KsngEvent>) {
-    if let Some(project) = &*app.project.borrow() {
+    let save_result = {
+      let Some(project) = &*app.project.borrow() else {
+        return;
+      };
+
       if project.name.is_none() {
         app.modals.add(SaveProjectModal {
           open: true,
@@ -20,13 +24,18 @@ impl SaveProjectModal {
         return;
       }
 
-      Logger::wrap(Data::save_project(project));
-    }
+      Data::save_project(project)
+    };
 
-    app.set_dirty_state(false);
+    match save_result {
+      Err(e) => log::error!("{e:?}"),
+      Ok(_) => {
+        app.set_dirty_state(false);
 
-    if let Some(after) = after {
-      app.dispatch(after);
+        if let Some(after) = after {
+          app.dispatch(after);
+        }
+      }
     }
   }
 }
@@ -56,11 +65,14 @@ impl KModal for SaveProjectModal {
             && let Some(project) = &mut *app.project.borrow_mut()
           {
             project.name = Some(self.name.clone());
-            Logger::wrap(Data::save_project(project));
-            project.dirty = false;
-            self.open = false;
-            if let Some(after) = &self.after {
-              app.dispatch(after.clone());
+            if let Err(e) = Data::save_project(project) {
+              log::error!("{e:?}");
+            } else {
+              project.dirty = false;
+              self.open = false;
+              if let Some(after) = &self.after {
+                app.dispatch(after.clone());
+              }
             }
           }
 
